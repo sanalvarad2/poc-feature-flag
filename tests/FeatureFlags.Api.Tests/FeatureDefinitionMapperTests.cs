@@ -73,6 +73,52 @@ public sealed class FeatureDefinitionMapperTests
     [Fact]
     public void BuildParameters_rejects_non_object_json()
     {
-        Assert.Throws<InvalidOperationException>(() => FeatureDefinitionMapper.BuildParameters("[1,2]"));
+        Assert.Throws<InvalidOperationException>(() => FeatureDefinitionMapper.BuildParametersObject("[1,2]"));
+    }
+
+    [Fact]
+    public void Maps_variants_allocation_and_status_override()
+    {
+        var flag = new FeatureFlag
+        {
+            Name = "Layout",
+            Enabled = true,
+            RequirementType = "Any",
+            DefaultWhenEnabled = "Small",
+            DefaultWhenDisabled = "Small",
+            AllocationSeed = "seed-1",
+            Variants =
+            [
+                new FeatureVariant
+                {
+                    Name = "Small",
+                    ConfigurationJson = """{"Size":300}""",
+                    StatusOverride = "None"
+                },
+                new FeatureVariant
+                {
+                    Name = "Big",
+                    ConfigurationJson = """{"Size":500}""",
+                    StatusOverride = "Disabled"
+                }
+            ],
+            AllocationUsers = [new FeatureAllocationUser { VariantName = "Big", UserId = "alice" }],
+            AllocationGroups = [new FeatureAllocationGroup { VariantName = "Big", GroupName = "Ring1" }],
+            AllocationPercentiles =
+            [
+                new FeatureAllocationPercentile { VariantName = "Big", From = 0, To = 10 }
+            ]
+        };
+
+        var definition = FeatureDefinitionMapper.ToDefinition(flag);
+
+        Assert.Equal(2, definition.Variants.Count());
+        var big = definition.Variants.Single(v => v.Name == "Big");
+        Assert.Equal(StatusOverride.Disabled, big.StatusOverride);
+        Assert.Equal("500", big.ConfigurationValue["Size"]);
+        Assert.NotNull(definition.Allocation);
+        Assert.Equal("Small", definition.Allocation!.DefaultWhenEnabled);
+        Assert.Contains(definition.Allocation.User!, u => u.Variant == "Big" && u.Users.Contains("alice"));
+        Assert.Contains(definition.Allocation.Percentile!, p => p.Variant == "Big" && p.From == 0 && p.To == 10);
     }
 }

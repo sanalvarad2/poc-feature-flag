@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FeatureFlags.Api.Models;
 using FeatureFlags.Api.Services;
 using Microsoft.FeatureManagement;
@@ -74,6 +75,30 @@ public static class FeatureEndpoints
         {
             var enabled = await featureManager.IsEnabledAsync(name).ConfigureAwait(false);
             return Results.Ok(new FeatureEnabledResponse(name, enabled));
+        });
+
+        group.MapGet("/{name}/variant", async (
+            string name,
+            IVariantFeatureManager variantFeatureManager,
+            FeatureAdminService admin,
+            CancellationToken cancellationToken) =>
+        {
+            var feature = await admin.GetAsync(name, cancellationToken).ConfigureAwait(false);
+            if (feature is null)
+            {
+                return Results.NotFound(new { error = $"Feature '{name}' was not found." });
+            }
+
+            var assigned = await variantFeatureManager.GetVariantAsync(name, cancellationToken).ConfigureAwait(false);
+            JsonElement? value = null;
+            if (assigned?.Name is not null)
+            {
+                value = feature.Variants
+                    .FirstOrDefault(v => string.Equals(v.Name, assigned.Name, StringComparison.OrdinalIgnoreCase))
+                    ?.ConfigurationValue;
+            }
+
+            return Results.Ok(new FeatureVariantResponse(name, assigned?.Name, value));
         });
 
         return group;

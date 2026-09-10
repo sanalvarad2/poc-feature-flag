@@ -11,22 +11,9 @@ public sealed class FeatureAdminService(
     FeatureFlagsDbContext db,
     SqlFeatureDefinitionProvider definitionProvider)
 {
-    private static readonly HashSet<string> KnownFilterNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Microsoft.Percentage",
-        "Microsoft.TimeWindow",
-        "Microsoft.Targeting",
-        "Percentage",
-        "TimeWindow",
-        "Targeting",
-        "AlwaysOn"
-    };
-
     public async Task<IReadOnlyList<FeatureResponse>> ListAsync(CancellationToken cancellationToken)
     {
-        var flags = await db.FeatureFlags
-            .AsNoTracking()
-            .Include(f => f.Filters)
+        var flags = await QueryFlags(asNoTracking: true)
             .OrderBy(f => f.Name)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -68,14 +55,20 @@ public sealed class FeatureAdminService(
             return (null, $"Feature '{name}' already exists.", StatusCodes.Status409Conflict);
         }
 
-        var now = DateTimeOffset.UtcNow;
         var flag = new FeatureFlag
         {
             Name = name,
             Enabled = request.Enabled,
             RequirementType = FeatureDefinitionMapper.NormalizeRequirementType(request.RequirementType),
-            UpdatedAt = now,
-            Filters = MapFilters(request.Filters)
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Filters = MapFilters(request.Filters),
+            Variants = MapVariants(request.Variants),
+            DefaultWhenEnabled = NullIfWhiteSpace(request.Allocation?.DefaultWhenEnabled),
+            DefaultWhenDisabled = NullIfWhiteSpace(request.Allocation?.DefaultWhenDisabled),
+            AllocationSeed = NullIfWhiteSpace(request.Allocation?.Seed),
+            AllocationUsers = MapAllocationUsers(request.Allocation),
+            AllocationGroups = MapAllocationGroups(request.Allocation),
+            AllocationPercentiles = MapAllocationPercentiles(request.Allocation)
         };
 
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
@@ -110,9 +103,21 @@ public sealed class FeatureAdminService(
         flag.Enabled = request.Enabled;
         flag.RequirementType = FeatureDefinitionMapper.NormalizeRequirementType(request.RequirementType);
         flag.UpdatedAt = DateTimeOffset.UtcNow;
+        flag.DefaultWhenEnabled = NullIfWhiteSpace(request.Allocation?.DefaultWhenEnabled);
+        flag.DefaultWhenDisabled = NullIfWhiteSpace(request.Allocation?.DefaultWhenDisabled);
+        flag.AllocationSeed = NullIfWhiteSpace(request.Allocation?.Seed);
 
         db.FeatureFilters.RemoveRange(flag.Filters);
+        db.FeatureVariants.RemoveRange(flag.Variants);
+        db.FeatureAllocationUsers.RemoveRange(flag.AllocationUsers);
+        db.FeatureAllocationGroups.RemoveRange(flag.AllocationGroups);
+        db.FeatureAllocationPercentiles.RemoveRange(flag.AllocationPercentiles);
+
         flag.Filters = MapFilters(request.Filters);
+        flag.Variants = MapVariants(request.Variants);
+        flag.AllocationUsers = MapAllocationUsers(request.Allocation);
+        flag.AllocationGroups = MapAllocationGroups(request.Allocation);
+        flag.AllocationPercentiles = MapAllocationPercentiles(request.Allocation);
 
         await BumpStoreVersionAsync(cancellationToken).ConfigureAwait(false);
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -158,54 +163,150 @@ public sealed class FeatureAdminService(
         meta.StoreVersion += 1;
     }
 
+    private IQueryable<FeatureFlag> QueryFlags(bool asNoTracking)
+    {
+        IQueryable<FeatureFlag> query = db.FeatureFlags
+            .Include(f => f.Filters)
+            .Include(f => f.Variants)
+            .Include(f => f.AllocationUsers)
+            .Include(f => f.AllocationGroups)
+            .Include(f => f.AllocationPercentiles);
+
+        return asNoTracking ? query.AsNoTracking() : query;
+    }
+
     private async Task<FeatureFlag?> FindTrackedAsync(string name, CancellationToken cancellationToken, bool asNoTracking)
     {
-        IQueryable<FeatureFlag> query = db.FeatureFlags.Include(f => f.Filters);
-        if (asNoTracking)
-        {
-            query = query.AsNoTracking();
-        }
-
-        return await query.FirstOrDefaultAsync(f => f.Name == name, cancellationToken).ConfigureAwait(false);
+        return await QueryFlags(asNoTracking)
+            .FirstOrDefaultAsync(f => f.Name == name, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private static string? ValidateRequest(UpsertFeatureRequest request)
     {
-        if (request.Filters is null)
+        if (request.Filters is not null)
+        {
+            foreach (var filter in request.Filters)
+            {
+                if (string.IsNullOrWhiteSpace(filter.Name))
+                {
+                    return "Filter name is required.";
+                }
+
+                if (filter.Parameters is { ValueKind: not JsonValueKind.Object and not JsonValueKind.Undefined and not JsonValueKind.Null })
+                {
+                    return $"Parameters for filter '{filter.Name}' must be a JSON object.";
+                }
+
+                if (IsPercentageFilter(filter.Name) && filter.Parameters is { ValueKind: JsonValueKind.Object } parameters)
+                {
+                    if (!parameters.TryGetProperty("Value", out var value) ||
+                        value.ValueKind is not (JsonValueKind.Number or JsonValueKind.String))
+                    {
+                        return "Microsoft.Percentage requires a 'Value' parameter.";
+                    }
+                }
+            }
+        }
+
+        var variantNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (request.Variants is not null)
+        {
+            foreach (var variant in request.Variants)
+            {
+                if (string.IsNullOrWhiteSpace(variant.Name))
+                {
+                    return "Variant name is required.";
+                }
+
+                if (!variantNames.Add(variant.Name.Trim()))
+                {
+                    return $"Duplicate variant name '{variant.Name}'.";
+                }
+
+                var status = FeatureDefinitionMapper.NormalizeStatusOverride(variant.StatusOverride);
+                if (variant.StatusOverride is not null
+                    && !string.Equals(variant.StatusOverride, status, StringComparison.OrdinalIgnoreCase)
+                    && !IsKnownStatusOverride(variant.StatusOverride))
+                {
+                    return $"Invalid statusOverride '{variant.StatusOverride}'. Use None, Enabled, or Disabled.";
+                }
+            }
+        }
+
+        if (request.Allocation is null)
         {
             return null;
         }
 
-        foreach (var filter in request.Filters)
+        return ValidateAllocation(request.Allocation, variantNames);
+    }
+
+    private static string? ValidateAllocation(AllocationDto allocation, HashSet<string> variantNames)
+    {
+        foreach (var referenced in EnumerateReferencedVariants(allocation))
         {
-            if (string.IsNullOrWhiteSpace(filter.Name))
+            if (!variantNames.Contains(referenced))
             {
-                return "Filter name is required.";
+                return $"Allocation references unknown variant '{referenced}'.";
             }
+        }
 
-            if (!KnownFilterNames.Contains(filter.Name) &&
-                !filter.Name.StartsWith("Microsoft.", StringComparison.OrdinalIgnoreCase))
+        if (allocation.Percentile is not null)
+        {
+            foreach (var percentile in allocation.Percentile)
             {
-                // Allow custom names but require JSON object parameters when present.
-            }
-
-            if (filter.Parameters is { ValueKind: not JsonValueKind.Object and not JsonValueKind.Undefined and not JsonValueKind.Null })
-            {
-                return $"Parameters for filter '{filter.Name}' must be a JSON object.";
-            }
-
-            if (IsPercentageFilter(filter.Name) && filter.Parameters is { ValueKind: JsonValueKind.Object } parameters)
-            {
-                if (!parameters.TryGetProperty("Value", out var value) ||
-                    value.ValueKind is not (JsonValueKind.Number or JsonValueKind.String))
+                if (percentile.From < 0 || percentile.To > 100 || percentile.From >= percentile.To)
                 {
-                    return "Microsoft.Percentage requires a 'Value' parameter.";
+                    return $"Invalid percentile range for variant '{percentile.Variant}' (From inclusive, To exclusive, 0-100).";
                 }
             }
         }
 
         return null;
     }
+
+    private static IEnumerable<string> EnumerateReferencedVariants(AllocationDto allocation)
+    {
+        if (!string.IsNullOrWhiteSpace(allocation.DefaultWhenEnabled))
+        {
+            yield return allocation.DefaultWhenEnabled.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(allocation.DefaultWhenDisabled))
+        {
+            yield return allocation.DefaultWhenDisabled.Trim();
+        }
+
+        if (allocation.User is not null)
+        {
+            foreach (var user in allocation.User)
+            {
+                yield return user.Variant;
+            }
+        }
+
+        if (allocation.Group is not null)
+        {
+            foreach (var group in allocation.Group)
+            {
+                yield return group.Variant;
+            }
+        }
+
+        if (allocation.Percentile is not null)
+        {
+            foreach (var percentile in allocation.Percentile)
+            {
+                yield return percentile.Variant;
+            }
+        }
+    }
+
+    private static bool IsKnownStatusOverride(string value) =>
+        value.Equals("None", StringComparison.OrdinalIgnoreCase)
+        || value.Equals("Enabled", StringComparison.OrdinalIgnoreCase)
+        || value.Equals("Disabled", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsPercentageFilter(string name) =>
         name.Equals("Microsoft.Percentage", StringComparison.OrdinalIgnoreCase) ||
@@ -221,12 +322,74 @@ public sealed class FeatureAdminService(
         return filters.Select((filter, index) => new FeatureFilter
         {
             Name = filter.Name.Trim(),
-            ParametersJson = SerializeParameters(filter.Parameters),
+            ParametersJson = SerializeJsonObject(filter.Parameters),
             SortOrder = index
         }).ToList();
     }
 
-    private static string SerializeParameters(JsonElement? parameters)
+    private static List<FeatureVariant> MapVariants(IReadOnlyList<FeatureVariantDto>? variants)
+    {
+        if (variants is null || variants.Count == 0)
+        {
+            return [];
+        }
+
+        return variants.Select(variant => new FeatureVariant
+        {
+            Name = variant.Name.Trim(),
+            ConfigurationJson = SerializeConfigurationValue(variant.ConfigurationValue),
+            StatusOverride = FeatureDefinitionMapper.NormalizeStatusOverride(variant.StatusOverride)
+        }).ToList();
+    }
+
+    private static List<FeatureAllocationUser> MapAllocationUsers(AllocationDto? allocation)
+    {
+        if (allocation?.User is null)
+        {
+            return [];
+        }
+
+        return allocation.User
+            .SelectMany(entry => entry.Users.Select(user => new FeatureAllocationUser
+            {
+                VariantName = entry.Variant.Trim(),
+                UserId = user.Trim()
+            }))
+            .ToList();
+    }
+
+    private static List<FeatureAllocationGroup> MapAllocationGroups(AllocationDto? allocation)
+    {
+        if (allocation?.Group is null)
+        {
+            return [];
+        }
+
+        return allocation.Group
+            .SelectMany(entry => entry.Groups.Select(group => new FeatureAllocationGroup
+            {
+                VariantName = entry.Variant.Trim(),
+                GroupName = group.Trim()
+            }))
+            .ToList();
+    }
+
+    private static List<FeatureAllocationPercentile> MapAllocationPercentiles(AllocationDto? allocation)
+    {
+        if (allocation?.Percentile is null)
+        {
+            return [];
+        }
+
+        return allocation.Percentile.Select(entry => new FeatureAllocationPercentile
+        {
+            VariantName = entry.Variant.Trim(),
+            From = entry.From,
+            To = entry.To
+        }).ToList();
+    }
+
+    private static string SerializeJsonObject(JsonElement? parameters)
     {
         if (parameters is null ||
             parameters.Value.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
@@ -237,25 +400,83 @@ public sealed class FeatureAdminService(
         return parameters.Value.GetRawText();
     }
 
+    private static string? SerializeConfigurationValue(JsonElement? value)
+    {
+        if (value is null || value.Value.ValueKind is JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return value.Value.GetRawText();
+    }
+
+    private static string? NullIfWhiteSpace(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     private static FeatureResponse ToResponse(FeatureFlag flag)
     {
         var filters = flag.Filters
             .OrderBy(f => f.SortOrder)
             .ThenBy(f => f.Id)
-            .Select(f => new FeatureFilterDto(f.Name, ParseParametersElement(f.ParametersJson)))
+            .Select(f => new FeatureFilterDto(f.Name, ParseJsonElement(f.ParametersJson, "{}")))
             .ToList();
+
+        var variants = flag.Variants
+            .OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(v => new FeatureVariantDto(
+                v.Name,
+                ParseOptionalJsonElement(v.ConfigurationJson),
+                v.StatusOverride))
+            .ToList();
+
+        AllocationDto? allocation = null;
+        if (!string.IsNullOrWhiteSpace(flag.DefaultWhenEnabled)
+            || !string.IsNullOrWhiteSpace(flag.DefaultWhenDisabled)
+            || !string.IsNullOrWhiteSpace(flag.AllocationSeed)
+            || flag.AllocationUsers.Count > 0
+            || flag.AllocationGroups.Count > 0
+            || flag.AllocationPercentiles.Count > 0)
+        {
+            allocation = new AllocationDto(
+                flag.DefaultWhenEnabled,
+                flag.DefaultWhenDisabled,
+                flag.AllocationSeed,
+                flag.AllocationUsers
+                    .GroupBy(u => u.VariantName, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => new UserAllocationDto(g.Key, g.Select(x => x.UserId).ToList()))
+                    .ToList(),
+                flag.AllocationGroups
+                    .GroupBy(u => u.VariantName, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => new GroupAllocationDto(g.Key, g.Select(x => x.GroupName).ToList()))
+                    .ToList(),
+                flag.AllocationPercentiles
+                    .Select(p => new PercentileAllocationDto(p.VariantName, p.From, p.To))
+                    .ToList());
+        }
 
         return new FeatureResponse(
             flag.Name,
             flag.Enabled,
             flag.RequirementType,
             filters,
+            variants,
+            allocation,
             flag.UpdatedAt);
     }
 
-    private static JsonElement ParseParametersElement(string? parametersJson)
+    private static JsonElement ParseJsonElement(string? json, string fallback)
     {
-        var json = string.IsNullOrWhiteSpace(parametersJson) ? "{}" : parametersJson;
+        var payload = string.IsNullOrWhiteSpace(json) ? fallback : json;
+        return JsonSerializer.Deserialize<JsonElement>(payload);
+    }
+
+    private static JsonElement? ParseOptionalJsonElement(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
         return JsonSerializer.Deserialize<JsonElement>(json);
     }
 }

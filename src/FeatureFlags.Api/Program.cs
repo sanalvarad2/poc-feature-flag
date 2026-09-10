@@ -41,18 +41,20 @@ builder.Services.AddDbContext<FeatureFlagsDbContext>(options =>
 });
 
 builder.Services.AddMemoryCache();
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<FeatureAdminService>();
 builder.Services.AddSingleton<SqlFeatureDefinitionProvider>();
 builder.Services.AddSingleton<IFeatureDefinitionProvider>(sp =>
     sp.GetRequiredService<SqlFeatureDefinitionProvider>());
-builder.Services.AddSingleton<ITargetingContextAccessor, EmptyTargetingContextAccessor>();
+builder.Services.AddSingleton<ITargetingContextAccessor, HttpHeaderTargetingContextAccessor>();
 builder.Services.AddHostedService<FeatureStoreVersionWatcher>();
 
 builder.Services
     .AddFeatureManagement()
     .AddFeatureFilter<PercentageFilter>()
     .AddFeatureFilter<TimeWindowFilter>()
-    .AddFeatureFilter<TargetingFilter>();
+    .AddFeatureFilter<TargetingFilter>()
+    .WithTargeting();
 
 var app = builder.Build();
 

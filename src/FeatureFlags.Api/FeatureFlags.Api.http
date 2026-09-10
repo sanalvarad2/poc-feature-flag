@@ -1,35 +1,80 @@
 @FeatureFlags.Api_HostAddress = http://localhost:5043
+@FeatureName = Precios
 
 ### List features
 GET {{FeatureFlags.Api_HostAddress}}/api/features
 
-### Create always-on feature
-POST {{FeatureFlags.Api_HostAddress}}/api/features/CheckoutV2
+### Create feature with variants
+POST {{FeatureFlags.Api_HostAddress}}/api/features/{{FeatureName}}
 Content-Type: application/json
 
 {
   "enabled": true,
   "requirementType": "Any",
-  "filters": []
+  "filters": [],
+  "variants": [
+    {
+      "name": "valorVenta",
+      "configurationValue": 300,
+      "statusOverride": "None"
+    },
+    {
+      "name": "valorCompra",
+      "configurationValue": 500,
+      "statusOverride": "None"
+    }
+  ],
+  "allocation": {
+    "defaultWhenEnabled": "valorVenta",
+    "defaultWhenDisabled": "valorCompra"
+  }
 }
 
-### Probe enablement
-GET {{FeatureFlags.Api_HostAddress}}/api/features/CheckoutV2/enabled
+### Get feature definition
+GET {{FeatureFlags.Api_HostAddress}}/api/features/{{FeatureName}}
 
-### Update with percentage filter
-PUT {{FeatureFlags.Api_HostAddress}}/api/features/CheckoutV2
+### Get assigned variant
+GET {{FeatureFlags.Api_HostAddress}}/api/features/{{FeatureName}}/variant
+
+### Get assigned variant for a user
+GET {{FeatureFlags.Api_HostAddress}}/api/features/{{FeatureName}}/variant
+X-User-Id: alice
+X-Groups: Ring1
+
+### Probe enablement
+GET {{FeatureFlags.Api_HostAddress}}/api/features/{{FeatureName}}/enabled
+
+### Update feature (variants / allocation)
+PUT {{FeatureFlags.Api_HostAddress}}/api/features/{{FeatureName}}
 Content-Type: application/json
 
 {
   "enabled": true,
   "requirementType": "Any",
-  "filters": [
+  "filters": [],
+  "variants": [
     {
-      "name": "Microsoft.Percentage",
-      "parameters": { "Value": 50 }
+      "name": "valorVenta",
+      "configurationValue": 350,
+      "statusOverride": "None"
+    },
+    {
+      "name": "valorCompra",
+      "configurationValue": 550,
+      "statusOverride": "None"
     }
-  ]
+  ],
+  "allocation": {
+    "defaultWhenEnabled": "valorVenta",
+    "defaultWhenDisabled": "valorCompra",
+    "user": [
+      {
+        "variant": "valorCompra",
+        "users": ["alice"]
+      }
+    ]
+  }
 }
 
 ### Delete feature
-DELETE {{FeatureFlags.Api_HostAddress}}/api/features/CheckoutV2
+DELETE {{FeatureFlags.Api_HostAddress}}/api/features/{{FeatureName}}

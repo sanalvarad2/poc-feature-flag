@@ -44,6 +44,10 @@ public sealed class SqlFeatureDefinitionProvider(
         var flags = await db.FeatureFlags
             .AsNoTracking()
             .Include(f => f.Filters)
+            .Include(f => f.Variants)
+            .Include(f => f.AllocationUsers)
+            .Include(f => f.AllocationGroups)
+            .Include(f => f.AllocationPercentiles)
             .ToListAsync()
             .ConfigureAwait(false);
 

@@ -9,6 +9,7 @@ using Microsoft.FeatureManagement.FeatureFilters;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -84,6 +85,7 @@ if (applyMigrations)
     }
 }
 
+app.MapControllers();
 app.MapFeatureEndpoints();
 
 app.Run();

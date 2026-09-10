@@ -48,6 +48,7 @@ Swagger UI: [http://localhost:5043/swagger](http://localhost:5043/swagger)
 | `PUT` | `/api/features/{name}` | Update feature |
 | `DELETE` | `/api/features/{name}` | Delete feature |
 | `GET` | `/api/features/{name}/enabled` | Public probe: is the feature enabled? |
+| `GET` | `/api/featurex` | Demo controller gated by `[FeatureGate("FeatureX")]` (404 if disabled/missing) |
 
 ### Create body example
 

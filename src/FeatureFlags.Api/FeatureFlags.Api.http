@@ -1,0 +1,35 @@
+@FeatureFlags.Api_HostAddress = http://localhost:5043
+
+### List features
+GET {{FeatureFlags.Api_HostAddress}}/api/features
+
+### Create always-on feature
+POST {{FeatureFlags.Api_HostAddress}}/api/features/CheckoutV2
+Content-Type: application/json
+
+{
+  "enabled": true,
+  "requirementType": "Any",
+  "filters": []
+}
+
+### Probe enablement
+GET {{FeatureFlags.Api_HostAddress}}/api/features/CheckoutV2/enabled
+
+### Update with percentage filter
+PUT {{FeatureFlags.Api_HostAddress}}/api/features/CheckoutV2
+Content-Type: application/json
+
+{
+  "enabled": true,
+  "requirementType": "Any",
+  "filters": [
+    {
+      "name": "Microsoft.Percentage",
+      "parameters": { "Value": 50 }
+    }
+  ]
+}
+
+### Delete feature
+DELETE {{FeatureFlags.Api_HostAddress}}/api/features/CheckoutV2
